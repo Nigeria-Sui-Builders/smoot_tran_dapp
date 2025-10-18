@@ -426,3 +426,334 @@ public fun get_verifier_reputation(verifier: &Verifier): u8 {
 public fun get_verifier_domain(verifier: &Verifier): String {
     verifier.name_service_domain
 }
+
+
+/////// Tests ///////
+
+#[test_only]
+use sui::test_scenario::{Self as ts};
+#[test_only]
+use std::unit_test::assert_eq;
+#[test_only]
+use sui::test_scenario::{take_shared, return_shared};
+#[test_only]
+use sui::clock;
+#[test_only]
+use sui::coin::mint_for_testing;
+
+#[test]
+fun test_vault_creation() {
+    let seller = @0xA;
+    let mut test = ts::begin(seller);
+    init(test.ctx());
+
+    test.next_tx(seller);
+    {
+    let mut registry = take_shared<VaultRegistry>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+
+    create_vault(
+    &mut registry,
+    b"NFT".to_string(),
+    1,
+    1000,
+    b"Rare NFT for sale".to_string(),
+    &clock,
+    test.ctx()
+    );
+
+    assert_eq!(registry.vaults.length(), 1);
+
+    return_shared(registry);
+    clock::destroy_for_testing(clock);
+    };
+
+    test.end();
+}
+
+#[test]
+fun test_full_purchase_flow() {
+    let seller = @0xA;
+    let buyer = @0xB;
+    let verifier1 = @0xC;
+    let verifier2 = @0xD;
+
+    let mut test = ts::begin(seller);
+    init(test.ctx());
+
+    // Seller creates vault
+    test.next_tx(seller);
+    {
+    let mut registry = take_shared<VaultRegistry>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+
+    create_vault(
+    &mut registry,
+    b"Token".to_string(),
+    100,
+    1000,
+    b"100 tokens for 1000 SUI".to_string(),
+    &clock,
+    test.ctx()
+    );
+
+    return_shared(registry);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Store verifier IDs for later retrieval
+    let verifier1_id: ID;
+    let verifier2_id: ID;
+
+    // Register verifier1
+    test.next_tx(verifier1);
+    {
+    let mut registry = take_shared<VerifierRegistry>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+
+    verifier1_id = register_verifier_internal(
+    &mut registry,
+    b"verifier1.sui".to_string(),
+    &clock,
+    test.ctx()
+    );
+
+    return_shared(registry);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Register verifier2
+    test.next_tx(verifier2);
+    {
+    let mut registry = take_shared<VerifierRegistry>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+
+    verifier2_id = register_verifier_internal(
+    &mut registry,
+    b"verifier2.sui".to_string(),
+    &clock,
+    test.ctx()
+    );
+
+    return_shared(registry);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Buyer initiates purchase
+    test.next_tx(buyer);
+    {
+    let mut vault = take_shared<Vault>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+    let payment = mint_for_testing<SUI>(1000, test.ctx());
+
+    initiate_purchase(
+    &mut vault,
+    payment,
+    2,
+    &clock,
+    test.ctx()
+    );
+
+    assert!(!vault.is_available, 0);
+
+    return_shared(vault);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Verifier 1 approves
+    test.next_tx(verifier1);
+    {
+    let mut deal = take_shared<Deal>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+    let mut verifier = test.take_shared_by_id<Verifier>(verifier1_id);
+
+    verify_deal(&mut deal, &mut verifier, true, &clock, test.ctx());
+
+    assert_eq!(deal.verifier_approvals.length(), 1);
+
+    return_shared(deal);
+    return_shared(verifier);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Verifier 2 approves - deal becomes verified
+    test.next_tx(verifier2);
+    {
+    let mut deal = take_shared<Deal>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+    let mut verifier = test.take_shared_by_id<Verifier>(verifier2_id);
+
+    verify_deal(&mut deal, &mut verifier, true, &clock, test.ctx());
+
+    assert_eq!(deal.verifier_approvals.length(), 2);
+    assert!(deal.status == DealStatus::Verified, 3);
+
+    return_shared(deal);
+    return_shared(verifier);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Complete the deal
+    test.next_tx(buyer);
+    {
+    let mut deal = take_shared<Deal>(&test);
+    let mut vault = take_shared<Vault>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+
+    complete_deal(&mut deal, &mut vault, &clock, test.ctx());
+
+    assert!(deal.status == DealStatus::Completed, 4);
+
+    return_shared(deal);
+    return_shared(vault);
+    clock::destroy_for_testing(clock);
+    };
+
+    test.end();
+}
+
+#[test, expected_failure(abort_code = EAlreadyApproved)]
+fun test_duplicate_verification() {
+    let seller = @0xA;
+    let buyer = @0xB;
+    let verifier1 = @0xC;
+
+    let mut test = ts::begin(seller);
+    init(test.ctx());
+
+    // Create vault
+    test.next_tx(seller);
+    {
+    let mut registry = take_shared<VaultRegistry>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+
+    create_vault(
+    &mut registry,
+    b"Item".to_string(),
+    1,
+    500,
+    b"Test item".to_string(),
+    &clock,
+    test.ctx()
+    );
+
+    return_shared(registry);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Register verifier
+    test.next_tx(verifier1);
+    {
+    let mut registry = take_shared<VerifierRegistry>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+
+    register_verifier(
+    &mut registry,
+    b"verifier1.sui".to_string(),
+    &clock,
+    test.ctx()
+    );
+
+    return_shared(registry);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Buyer purchases
+    test.next_tx(buyer);
+    {
+    let mut vault = take_shared<Vault>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+    let payment = mint_for_testing<SUI>(500, test.ctx());
+
+    initiate_purchase(&mut vault, payment, 1, &clock, test.ctx());
+
+    return_shared(vault);
+    clock::destroy_for_testing(clock);
+    };
+
+    // First approval
+    test.next_tx(verifier1);
+    {
+    let mut deal = take_shared<Deal>(&test);
+    let mut verifier = take_shared<Verifier>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+
+    verify_deal(&mut deal, &mut verifier, true, &clock, test.ctx());
+
+    return_shared(deal);
+    return_shared(verifier);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Try to approve again - should fail
+    test.next_tx(verifier1);
+    {
+    let mut deal = take_shared<Deal>(&test);
+    let mut verifier = take_shared<Verifier>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+
+    verify_deal(&mut deal, &mut verifier, true, &clock, test.ctx());
+
+    return_shared(deal);
+    return_shared(verifier);
+    clock::destroy_for_testing(clock);
+    };
+
+    test.end();
+}
+
+/// Test event emission
+#[test]
+fun test_events() {
+    let seller = @0xA;
+    let buyer = @0xB;
+    let mut test = ts::begin(seller);
+    init(test.ctx());
+
+    // Create vault
+    test.next_tx(seller);
+    {
+    let mut registry = take_shared<VaultRegistry>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+
+    create_vault(
+    &mut registry,
+    b"NFT".to_string(),
+    1,
+    1000,
+    b"Test NFT".to_string(),
+    &clock,
+    test.ctx()
+    );
+
+    return_shared(registry);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Check VaultCreated event
+    let vault_events: vector<VaultCreated> = event::events_by_type<VaultCreated>();
+    assert_eq!(vault_events.length(), 1);
+    assert_eq!(vault_events[0].seller, seller);
+    assert_eq!(vault_events[0].price, 1000);
+
+    // Buyer purchases
+    test.next_tx(buyer);
+    {
+    let mut vault = take_shared<Vault>(&test);
+    let clock = clock::create_for_testing(test.ctx());
+    let payment = mint_for_testing<SUI>(1000, test.ctx());
+
+    initiate_purchase(&mut vault, payment, 1, &clock, test.ctx());
+
+    return_shared(vault);
+    clock::destroy_for_testing(clock);
+    };
+
+    // Check DealCreated event
+    let deal_events: vector<DealCreated> = event::events_by_type<DealCreated>();
+    assert_eq!(deal_events.length(), 1);
+    assert_eq!(deal_events[0].buyer, buyer);
+    assert_eq!(deal_events[0].seller, seller);
+
+    test.end();
+}
